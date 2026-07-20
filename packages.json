@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "name": "htop",
+      "url": "https://github.com/htop-dev/htop.git"
+    }
+  ]
+}
