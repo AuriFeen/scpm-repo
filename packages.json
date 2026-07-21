@@ -2,35 +2,83 @@
   "packages": [
     {
       "name": "htop",
-      "url": "https://github.com/htop-dev/htop.git"
+      "url": "https://github.com/htop-dev/htop.git",
+      "dependencies": ["ncurses"]
     },
     {
       "name": "redis",
-      "url": "https://github.com/redis/redis.git"
+      "url": "https://github.com/redis/redis.git",
+      "dependencies": []
     },
     {
       "name": "git",
-      "url": "https://github.com/git/git.git"
+      "url": "https://github.com/git/git.git",
+      "dependencies": ["zlib", "openssl", "curl"]
     },
     {
       "name": "tmux",
-      "url": "https://github.com/tmux/tmux.git"
+      "url": "https://github.com/tmux/tmux.git",
+      "dependencies": ["ncurses", "libevent"]
     },
     {
       "name": "curl",
-      "url": "https://github.com/curl/curl.git"
+      "url": "https://github.com/curl/curl.git",
+      "dependencies": ["openssl", "zlib"]
     },
     {
       "name": "jq",
-      "url": "https://github.com/stedolan/jq.git"
+      "url": "https://github.com/stedolan/jq.git",
+      "dependencies": ["oniguruma"]
     },
     {
       "name": "mpv",
-      "url": "https://github.com/mpv-player/mpv.git"
+      "url": "https://github.com/mpv-player/mpv.git",
+      "dependencies": ["ffmpeg", "libass", "lua"]
     },
     {
       "name": "zstd",
-      "url": "https://github.com/facebook/zstd.git"
+      "url": "https://github.com/facebook/zstd.git",
+      "dependencies": []
+    },
+    {
+      "name": "ncurses",
+      "url": "https://github.com/mirror/ncurses.git",
+      "dependencies": []
+    },
+    {
+      "name": "zlib",
+      "url": "https://github.com/madler/zlib.git",
+      "dependencies": []
+    },
+    {
+      "name": "openssl",
+      "url": "https://github.com/openssl/openssl.git",
+      "dependencies": ["zlib"]
+    },
+    {
+      "name": "libevent",
+      "url": "https://github.com/libevent/libevent.git",
+      "dependencies": []
+    },
+    {
+      "name": "oniguruma",
+      "url": "https://github.com/kkos/oniguruma.git",
+      "dependencies": []
+    },
+    {
+      "name": "ffmpeg",
+      "url": "https://github.com/FFmpeg/FFmpeg.git",
+      "dependencies": ["zlib", "openssl"]
+    },
+    {
+      "name": "libass",
+      "url": "https://github.com/libass/libass.git",
+      "dependencies": ["zlib"]
+    },
+    {
+      "name": "lua",
+      "url": "https://github.com/lua/lua.git",
+      "dependencies": []
     }
   ]
 }
