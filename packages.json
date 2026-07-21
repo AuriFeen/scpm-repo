@@ -42,10 +42,11 @@
       "url": "https://github.com/facebook/zstd.git",
       "dependencies": []
     },
+   [
     {
     "name": "ncurses",
     "url": "https://github.com/mirror/ncurses.git",
-    "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --with-xterm-kbs=DEL",
+    "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --enable-widec --with-xterm-kbs=DEL",
     "dependencies": []
     },
     {
