@@ -1,10 +1,12 @@
 {
   "packages": [
-    {
-      "name": "htop",
-      "url": "https://github.com/htop-dev/htop.git",
-      "dependencies": ["ncurses"]
-    },
+  {
+    "name": "htop",
+    "url": "https://github.com/htop-dev/htop.git",
+    "configure_flags": "",
+    "dependencies": [
+      "ncurses"
+    ]
     {
       "name": "redis",
       "url": "https://github.com/redis/redis.git",
@@ -41,10 +43,10 @@
       "dependencies": []
     },
     {
-      "name": "ncurses",
-      "url": "https://github.com/mirror/ncurses.git",
-      "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --with-xterm-kbs=DEL",
-      "dependencies": []
+    "name": "ncurses",
+    "url": "https://github.com/mirror/ncurses.git",
+    "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --with-xterm-kbs=DEL",
+    "dependencies": []
     },
     {
       "name": "zlib",
