@@ -43,6 +43,7 @@
     {
       "name": "ncurses",
       "url": "https://github.com/mirror/ncurses.git",
+      "configure_flags": "--with-shared --without-ada --with-xterm-kbs=DEL",
       "dependencies": []
     },
     {
