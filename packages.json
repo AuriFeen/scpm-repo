@@ -1,8 +1,39 @@
+```json
 {
   "packages": [
     {
       "name": "htop",
       "url": "https://github.com/htop-dev/htop.git"
+    },
+    {
+      "name": "redis",
+      "url": "https://github.com/redis/redis.git"
+    },
+    {
+      "name": "git",
+      "url": "https://github.com/git/git.git"
+    },
+    {
+      "name": "tmux",
+      "url": "https://github.com/tmux/tmux.git"
+    },
+    {
+      "name": "curl",
+      "url": "https://github.com/curl/curl.git"
+    },
+    {
+      "name": "jq",
+      "url": "https://github.com/stedolan/jq.git"
+    },
+    {
+      "name": "mpv",
+      "url": "https://github.com/mpv-player/mpv.git"
+    },
+    {
+      "name": "zstd",
+      "url": "https://github.com/facebook/zstd.git"
     }
   ]
 }
+
+```
