@@ -1,0 +1,88 @@
+{
+  "packages": [
+    {
+      "name": "ncurses",
+      "url": "https://github.com/mirror/ncurses/archive/refs/heads/master.zip",
+      "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --enable-widec --with-xterm-kbs=DEL",
+      "dependencies": []
+    },
+    {
+      "name": "htop",
+      "url": "https://github.com/htop-dev/htop/archive/refs/heads/main.zip",
+      "configure_flags": "",
+      "dependencies": [
+        "ncurses"
+      ]
+    },
+    {
+      "name": "redis",
+      "url": "https://github.com/redis/redis/archive/refs/heads/unstable.zip",
+      "dependencies": []
+    },
+    {
+      "name": "git",
+      "url": "https://github.com/git/git/archive/refs/heads/master.zip",
+      "dependencies": ["zlib", "openssl", "curl"]
+    },
+    {
+      "name": "tmux",
+      "url": "https://github.com/tmux/tmux/archive/refs/heads/master.zip",
+      "dependencies": ["ncurses", "libevent"]
+    },
+    {
+      "name": "curl",
+      "url": "https://github.com/curl/curl/archive/refs/heads/master.zip",
+      "dependencies": ["openssl", "zlib"]
+    },
+    {
+      "name": "jq",
+      "url": "https://github.com/stedolan/jq/archive/refs/heads/master.zip",
+      "dependencies": ["oniguruma"]
+    },
+    {
+      "name": "mpv",
+      "url": "https://github.com/mpv-player/mpv/archive/refs/heads/master.zip",
+      "dependencies": ["ffmpeg", "libass", "lua"]
+    },
+    {
+      "name": "zstd",
+      "url": "https://github.com/facebook/zstd/archive/refs/heads/dev.zip",
+      "dependencies": []
+    },
+    {
+      "name": "zlib",
+      "url": "https://github.com/madler/zlib/archive/refs/heads/master.zip",
+      "dependencies": []
+    },
+    {
+      "name": "openssl",
+      "url": "https://github.com/openssl/openssl/archive/refs/heads/master.zip",
+      "dependencies": ["zlib"]
+    },
+    {
+      "name": "libevent",
+      "url": "https://github.com/libevent/libevent/archive/refs/heads/master.zip",
+      "dependencies": []
+    },
+    {
+      "name": "oniguruma",
+      "url": "https://github.com/kkos/oniguruma/archive/refs/heads/master.zip",
+      "dependencies": []
+    },
+    {
+      "name": "ffmpeg",
+      "url": "https://github.com/FFmpeg/FFmpeg/archive/refs/heads/master.zip",
+      "dependencies": ["zlib", "openssl"]
+    },
+    {
+      "name": "libass",
+      "url": "https://github.com/libass/libass/archive/refs/heads/master.zip",
+      "dependencies": ["zlib"]
+    },
+    {
+      "name": "lua",
+      "url": "https://github.com/lua/lua/archive/refs/heads/main.zip",
+      "dependencies": []
+    }
+  ]
+}
