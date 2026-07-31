@@ -7,13 +7,18 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <errno.h>
 #include <curl/curl.h>
-#include <git2.h>
-#include "c_progress_bar.h"
+#include <time.h>
 
 #define DB_DIR "/var/lib/scpm"
 #define MANIFEST_DIR "/var/lib/scpm/installed"
-#define INDEX_URL "https://raw.githubusercontent.com/AuriFeen/scpm-repo/main/packages.json"
+#define LOCAL_INDEX_PATH "/var/lib/scpm/packages.json"
+#define CONFIG_PATH "/etc/scpm/scpm.conf"
+
+/* Default fallback repository URLs */
+#define DEFAULT_STABLE_URL "https://aurifeen.github.io/scpm-repo/packages-stable.json"
+#define DEFAULT_BLEEDING_URL "https://aurifeen.github.io/scpm-repo/packages-bleeding.json"
 
 static volatile sig_atomic_t winch_received = 0;
 
@@ -30,6 +35,197 @@ static int get_terminal_cols(void) {
     return 80;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Configuration & Stream Management                                         */
+/* ------------------------------------------------------------------------- */
+
+static void write_default_config(void) {
+    mkdir("/etc/scpm", 0755);
+    FILE *f = fopen(CONFIG_PATH, "w");
+    if (!f) return;
+
+    fprintf(f, "# =========================================================================\n");
+    fprintf(f, "# SCPM (Simple C Package Manager) Configuration File\n");
+    fprintf(f, "# =========================================================================\n");
+    fprintf(f, "# Choose your active package stream channel:\n");
+    fprintf(f, "# source %s\n", DEFAULT_STABLE_URL);
+    fprintf(f, "source %s\n\n", DEFAULT_BLEEDING_URL);
+    fprintf(f, "# [overrides]\n");
+    fprintf(f, "# Format: pkg_name=custom_archive_url|custom_configure_flags\n");
+    fprintf(f, "# Example override for bleeding edge htop:\n");
+    fprintf(f, "# htop=https://github.com/htop-dev/htop/archive/refs/heads/main.zip|--enable-unicode\n");
+    fclose(f);
+}
+
+static int get_active_source_url(char *url_dest, size_t max_len) {
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) {
+        write_default_config();
+        f = fopen(CONFIG_PATH, "r");
+        if (!f) {
+            snprintf(url_dest, max_len, "%s", DEFAULT_STABLE_URL);
+            return 0;
+        }
+    }
+
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (strncmp(p, "source ", 7) == 0) {
+            snprintf(url_dest, max_len, "%s", p + 7);
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+
+    if (!found) {
+        snprintf(url_dest, max_len, "%s", DEFAULT_STABLE_URL);
+    }
+    return 0;
+}
+
+static int get_package_override(const char *pkg_name, char *url_dest, size_t max_url_len, char *flags_dest, size_t max_flags_len) {
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) return -1;
+
+    char line[1024];
+    int in_overrides = 0;
+    int found = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (strncmp(p, "[overrides]", 11) == 0) {
+            in_overrides = 1;
+            continue;
+        }
+
+        if (in_overrides && p[0] != '#' && p[0] != '\0') {
+            char *eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                char *name = p;
+                char *val = eq + 1;
+
+                if (strcmp(name, pkg_name) == 0) {
+                    char *pipe = strchr(val, '|');
+                    if (pipe) {
+                        *pipe = '\0';
+                        snprintf(url_dest, max_url_len, "%s", val);
+                        snprintf(flags_dest, max_flags_len, "%s", pipe + 1);
+                    } else {
+                        snprintf(url_dest, max_url_len, "%s", val);
+                        flags_dest[0] = '\0';
+                    }
+                    found = 1;
+                    break;
+                }
+            }
+        }
+    }
+    fclose(f);
+    return found ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Self-contained terminal progress bar                                      */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    const char *description;
+    double min_refresh_time;
+} CPB_Config;
+
+typedef struct {
+    int current;
+    int total;
+    CPB_Config config;
+    struct timespec last_update;
+    int active;
+} CPB_ProgressBar;
+
+static CPB_Config cpb_get_default_config(void) {
+    CPB_Config cfg = {0};
+    cfg.description = "Progress";
+    cfg.min_refresh_time = 0.05;
+    return cfg;
+}
+
+static double cpb_timespec_diff(const struct timespec *a, const struct timespec *b) {
+    return (a->tv_sec - b->tv_sec) + (a->tv_nsec - b->tv_nsec) / 1e9;
+}
+
+static void cpb_draw(CPB_ProgressBar *bar) {
+    int cols = get_terminal_cols();
+    if (cols < 20) cols = 20;
+
+    const char *desc = bar->config.description ? bar->config.description : "";
+    int desc_len = (int)strlen(desc);
+
+    int pct = (bar->total > 0) ? (bar->current * 100 / bar->total) : 0;
+    int bar_width = cols - desc_len - 20;
+    if (bar_width < 10) bar_width = 10;
+
+    int filled = (bar->total > 0) ? (bar->current * bar_width / bar->total) : 0;
+    if (filled > bar_width) filled = bar_width;
+
+    printf("\r\033[K");
+    printf("%s [", desc);
+    for (int i = 0; i < bar_width; i++) {
+        if (i < filled) printf("=");
+        else if (i == filled) printf(">");
+        else printf(" ");
+    }
+    printf("] %3d%% (%d/%d)", pct, bar->current, bar->total);
+    fflush(stdout);
+}
+
+static void cpb_init(CPB_ProgressBar *bar, int current, int total, CPB_Config config) {
+    memset(bar, 0, sizeof(*bar));
+    bar->current = current;
+    bar->total = total;
+    bar->config = config;
+    clock_gettime(CLOCK_MONOTONIC, &bar->last_update);
+    bar->active = 0;
+}
+
+static void cpb_start(CPB_ProgressBar *bar) {
+    bar->active = 1;
+    cpb_draw(bar);
+}
+
+static void cpb_update(CPB_ProgressBar *bar, int current) {
+    if (!bar->active) return;
+    bar->current = current;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (cpb_timespec_diff(&now, &bar->last_update) >= bar->config.min_refresh_time) {
+        cpb_draw(bar);
+        bar->last_update = now;
+    }
+}
+
+static void cpb_finish(CPB_ProgressBar *bar) {
+    if (!bar->active) return;
+    bar->current = bar->total;
+    cpb_draw(bar);
+    printf("\n");
+    fflush(stdout);
+    bar->active = 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* SCPM core networking & execution                                          */
+/* ------------------------------------------------------------------------- */
+
 struct MemoryStruct {
     char *memory;
     size_t size;
@@ -40,10 +236,7 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
     struct MemoryStruct *mem = (struct MemoryStruct *)userp;
 
     char *ptr = realloc(mem->memory, mem->size + realsize + 1);
-    if (!ptr) {
-        fprintf(stderr, "\n[-] Not enough memory (realloc returned NULL)\n");
-        return 0;
-    }
+    if (!ptr) return 0;
 
     mem->memory = ptr;
     memcpy(&(mem->memory[mem->size]), contents, realsize);
@@ -55,111 +248,157 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
 
 int run_cmd(const char *cmd) {
     int ret = system(cmd);
-    if (ret != 0) {
+    if (ret == -1 || (WIFEXITED(ret) && WEXITSTATUS(ret) != 0)) {
         return -1;
     }
     return 0;
 }
 
-void init_db() {
+int init_db() {
     mkdir("/var/lib", 0755);
     mkdir(DB_DIR, 0755);
     mkdir(MANIFEST_DIR, 0755);
+    return 0;
 }
 
 int is_package_installed(const char *pkg_name) {
-    char db_manifest[1150];
+    char db_manifest[4096];
     snprintf(db_manifest, sizeof(db_manifest), "%s/%s.list", MANIFEST_DIR, pkg_name);
     struct stat st;
-    return (stat(db_manifest, &st) == 0);
+    return (stat(db_manifest, &st) == 0) ? 1 : 0;
 }
 
-int fetch_package_index(struct MemoryStruct *chunk) {
-    CURL *curl_handle;
-    CURLcode res;
+int fetch_remote_index(struct MemoryStruct *chunk) {
+    char index_url[512];
+    get_active_source_url(index_url, sizeof(index_url));
 
-    curl_global_init(CURL_GLOBAL_ALL);
-    curl_handle = curl_easy_init();
-    if (!curl_handle) return -1;
+    CURL *curl = curl_easy_init();
+    if (!curl) return -1;
 
-    curl_easy_setopt(curl_handle, CURLOPT_URL, INDEX_URL);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)chunk);
-    curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "scpm-client/1.0");
-    curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_URL, index_url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)chunk);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "scpm-client/2.0");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
 
-    res = curl_easy_perform(curl_handle);
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl_handle);
-        curl_global_cleanup();
+    CURLcode res = curl_easy_perform(curl);
+    long response_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || response_code != 200) {
+        fprintf(stderr, "[-] Error: Failed to fetch package index from %s\n", index_url);
+        return -1;
+    }
+    return 0;
+}
+
+int pkg_update() {
+    init_db();
+    printf("[+] Updating package index from active stream...\n");
+    
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.size = 0;
+
+    if (fetch_remote_index(&chunk) != 0) {
+        free(chunk.memory);
         return -1;
     }
 
-    long response_code = 0;
-    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &response_code);
-    curl_easy_cleanup(curl_handle);
-    curl_global_cleanup();
-    return (response_code == 200) ? 0 : -1;
+    FILE *f = fopen(LOCAL_INDEX_PATH, "w");
+    if (!f) {
+        free(chunk.memory);
+        return -1;
+    }
+
+    fwrite(chunk.memory, 1, chunk.size, f);
+    fclose(f);
+    free(chunk.memory);
+
+    printf("[+] Success! Database updated successfully.\n");
+    return 0;
 }
 
-int package_exists_in_index(const char *pkg_name, const char *json_data) {
-    char search_pattern[256];
-    snprintf(search_pattern, sizeof(search_pattern), "\"name\": \"%s\"", pkg_name);
-    return (strstr(json_data, search_pattern) != NULL);
+int load_package_index(struct MemoryStruct *chunk) {
+    FILE *f = fopen(LOCAL_INDEX_PATH, "r");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long length = ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        if (length > 0) {
+            chunk->memory = malloc(length + 1);
+            if (chunk->memory) {
+                size_t read_bytes = fread(chunk->memory, 1, length, f);
+                chunk->memory[read_bytes] = '\0';
+                chunk->size = read_bytes;
+                fclose(f);
+                return 0;
+            }
+        }
+        fclose(f);
+    }
+
+    chunk->memory = malloc(1);
+    chunk->size = 0;
+    return fetch_remote_index(chunk);
 }
 
 int resolve_package_info(const char *target_pkg, const char *json_data, char *url_dest, size_t max_url_len, char *flags_dest, size_t max_flags_len, char deps_dest[][64], int *dep_count, int max_deps) {
+    if (get_package_override(target_pkg, url_dest, max_url_len, flags_dest, max_flags_len) == 0) {
+        printf("[*] Applied config override for package: %s\n", target_pkg);
+        *dep_count = 0;
+        return 0;
+    }
+
     char search_pattern[256];
     snprintf(search_pattern, sizeof(search_pattern), "\"name\": \"%s\"", target_pkg);
 
-    char *p = (char *)strstr(json_data, search_pattern);
-    if (!p) return -1;
+    const char *p = strstr(json_data, search_pattern);
+    if (!p) {
+        fprintf(stderr, "[-] Error: Package '%s' not found in index.\n", target_pkg);
+        return -1;
+    }
 
-    // Locate URL
-    char *url_ptr = strstr(p, "\"url\": \"");
+    const char *url_ptr = strstr(p, "\"url\": \"");
     if (!url_ptr) return -1;
     url_ptr += 8;
-    char *end_quote = strchr(url_ptr, '"');
-    if (!end_quote) return -1;
-
+    const char *end_quote = strchr(url_ptr, '"');
     size_t len = end_quote - url_ptr;
-    if (len >= max_url_len) return -1;
-    strncpy(url_dest, url_ptr, len);
+    if (len >= max_url_len) len = max_url_len - 1;
+    memcpy(url_dest, url_ptr, len);
     url_dest[len] = '\0';
 
-    // Locate optional configure_flags
     flags_dest[0] = '\0';
-    char *flags_ptr = strstr(p, "\"configure_flags\": \"");
+    const char *flags_ptr = strstr(p, "\"configure_flags\": \"");
     if (flags_ptr) {
         flags_ptr += 20;
-        char *flags_end = strchr(flags_ptr, '"');
-        if (flags_end) {
-            size_t flen = flags_end - flags_ptr;
-            if (flen < max_flags_len) {
-                strncpy(flags_dest, flags_ptr, flen);
-                flags_dest[flen] = '\0';
-            }
+        const char *flags_end = strchr(flags_ptr, '"');
+        size_t flen = flags_end - flags_ptr;
+        if (flen < max_flags_len) {
+            memcpy(flags_dest, flags_ptr, flen);
+            flags_dest[flen] = '\0';
         }
     }
 
-    // Locate Dependencies array
     *dep_count = 0;
-    char *dep_array_ptr = strstr(p, "\"dependencies\":");
+    const char *dep_array_ptr = strstr(p, "\"dependencies\":");
     if (dep_array_ptr) {
-        char *bracket_start = strchr(dep_array_ptr, '[');
-        char *bracket_end = strchr(dep_array_ptr, ']');
+        const char *bracket_start = strchr(dep_array_ptr, '[');
+        const char *bracket_end = strchr(dep_array_ptr, ']');
         if (bracket_start && bracket_end && bracket_start < bracket_end) {
-            char *curr = bracket_start + 1;
+            const char *curr = bracket_start + 1;
             while (curr < bracket_end) {
-                char *q1 = strchr(curr, '"');
+                const char *q1 = strchr(curr, '"');
                 if (!q1 || q1 > bracket_end) break;
-                char *q2 = strchr(q1 + 1, '"');
+                const char *q2 = strchr(q1 + 1, '"');
                 if (!q2 || q2 > bracket_end) break;
 
                 size_t dlen = q2 - (q1 + 1);
-                if (dlen < 64 && *dep_count < max_deps) {
-                    strncpy(deps_dest[*dep_count], q1 + 1, dlen);
+                if (*dep_count < max_deps && dlen < 64) {
+                    memcpy(deps_dest[*dep_count], q1 + 1, dlen);
                     deps_dest[*dep_count][dlen] = '\0';
                     (*dep_count)++;
                 }
@@ -167,45 +406,154 @@ int resolve_package_info(const char *target_pkg, const char *json_data, char *ur
             }
         }
     }
-
     return 0;
 }
 
-int clone_package_repo(const char *repo_url, const char *dest_dir) {
-    git_repository *repo = NULL;
-    int error = 0;
+int fetch_and_extract_archive(const char *archive_url, const char *dest_dir) {
+    char archive_path[512];
+    snprintf(archive_path, sizeof(archive_path), "%s/source.archive", dest_dir);
 
-    git_libgit2_init();
-    error = git_clone(&repo, repo_url, dest_dir, NULL);
-    if (error < 0) {
-        git_libgit2_shutdown();
+    char prep_cmd[1024];
+    snprintf(prep_cmd, sizeof(prep_cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", dest_dir, dest_dir);
+    if (run_cmd(prep_cmd) != 0) return -1;
+
+    printf("[+] Downloading archive from %s...\n", archive_url);
+    CURL *curl = curl_easy_init();
+    if (!curl) return -1;
+
+    FILE *fp = fopen(archive_path, "wb");
+    if (!fp) {
+        curl_easy_cleanup(curl);
         return -1;
     }
 
-    if (repo) git_repository_free(repo);
-    git_libgit2_shutdown();
+    curl_easy_setopt(curl, CURLOPT_URL, archive_url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "scpm-client/2.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+    CURLcode res = curl_easy_perform(curl);
+    fclose(fp);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[-] Error: Archive download failed.\n");
+        return -1;
+    }
+
+    printf("[+] Extracting archive...\n");
+    char extract_cmd[2048];
+    snprintf(extract_cmd, sizeof(extract_cmd), "unzip -q \"%s\" -d \"%s\" && rm -f \"%s\"", archive_path, dest_dir, archive_path);
+    if (run_cmd(extract_cmd) != 0) {
+        fprintf(stderr, "[-] Error: Extraction failed (ensure 'unzip' is installed).\n");
+        return -1;
+    }
+
     return 0;
 }
 
-// Forward declaration for recursion
-int pkg_install_internal(const char *pkg_name, const char *json_data);
+int build_and_install_repo(const char *repo_dir, const char *pkg_name, const char *configure_flags) {
+    CPB_Config config = cpb_get_default_config();
+    config.description = "Installing";
+    CPB_ProgressBar bar;
+    cpb_init(&bar, 0, 5, config);
+    cpb_start(&bar);
+
+    char find_cmd[1024];
+    snprintf(find_cmd, sizeof(find_cmd), "cd \"%s\" && echo */", repo_dir);
+    FILE *fp = popen(find_cmd, "r");
+    char subfolder[256] = "";
+    if (fp) {
+        if (fgets(subfolder, sizeof(subfolder), fp) != NULL) {
+            subfolder[strcspn(subfolder, "\r\n/")] = 0;
+        }
+        pclose(fp);
+    }
+
+    char src_path[2048];
+    if (strlen(subfolder) > 0) {
+        snprintf(src_path, sizeof(src_path), "%s/%s", repo_dir, subfolder);
+    } else {
+        snprintf(src_path, sizeof(src_path), "%s", repo_dir);
+    }
+
+    cpb_update(&bar, 2);
+
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && if [ -f autogen.sh ]; then ./autogen.sh; fi && if [ -f configure ]; then ./configure %s; fi", src_path, configure_flags);
+    if (run_cmd(cmd) != 0) {
+        cpb_finish(&bar);
+        fprintf(stderr, "[-] Error: Configure failed for '%s'.\n", pkg_name);
+        return -1;
+    }
+
+    cpb_update(&bar, 3);
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && make", src_path);
+    if (run_cmd(cmd) != 0) {
+        cpb_finish(&bar);
+        fprintf(stderr, "[-] Error: Build failed for '%s'.\n", pkg_name);
+        return -1;
+    }
+
+    cpb_update(&bar, 4);
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && make install", src_path);
+    if (run_cmd(cmd) != 0) {
+        cpb_finish(&bar);
+        fprintf(stderr, "[-] Error: Install failed for '%s'.\n", pkg_name);
+        return -1;
+    }
+
+    cpb_finish(&bar);
+
+    char manifest_path[2150];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/%s.list", MANIFEST_DIR, pkg_name);
+    FILE *mf = fopen(manifest_path, "w");
+    if (mf) {
+        fprintf(mf, "usr/local/bin/%s\n", pkg_name);
+        fclose(mf);
+    }
+
+    printf("[+] Successfully compiled and installed %s!\n", pkg_name);
+    return 0;
+}
+
+int pkg_install_internal(const char *target_pkg, const char *json_data) {
+    if (is_package_installed(target_pkg)) {
+        printf("[+] Package '%s' is already installed, skipping.\n", target_pkg);
+        return 0;
+    }
+
+    char archive_url[512];
+    char configure_flags[256] = "";
+    char dependencies[32][64];
+    int dep_count = 0;
+
+    if (resolve_package_info(target_pkg, json_data, archive_url, sizeof(archive_url), configure_flags, sizeof(configure_flags), dependencies, &dep_count, 32) != 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < dep_count; i++) {
+        printf("[+] Resolving dependency: %s\n", dependencies[i]);
+        if (pkg_install_internal(dependencies[i], json_data) != 0) return -1;
+    }
+
+    if (fetch_and_extract_archive(archive_url, "/tmp/scpm_build") != 0) return -1;
+
+    return build_and_install_repo("/tmp/scpm_build", target_pkg, configure_flags);
+}
 
 int pkg_install(const char *pkg_name) {
     init_db();
-
     if (is_package_installed(pkg_name)) {
         printf("[+] Package '%s' is already installed.\n", pkg_name);
         return 0;
     }
 
     struct MemoryStruct chunk;
-    chunk.memory = malloc(1);
-    chunk.size = 0;
-
-    printf("[+] Fetching repository index for package '%s'...\n", pkg_name);
-    if (fetch_package_index(&chunk) != 0) {
-        free(chunk.memory);
-        fprintf(stderr, "[-] Failed to fetch package index.\n");
+    if (load_package_index(&chunk) != 0) {
+        fprintf(stderr, "[-] Error: Failed to load package database. Run 'scpm update' first.\n");
         return -1;
     }
 
@@ -214,224 +562,28 @@ int pkg_install(const char *pkg_name) {
     return ret;
 }
 
-int pkg_install_internal(const char *pkg_name, const char *json_data) {
-    if (is_package_installed(pkg_name)) {
-        printf("[+] Dependency '%s' is already installed, skipping.\n", pkg_name);
-        return 0;
-    }
-
-    char repo_url[512];
-    char configure_flags[256] = "";
-    char dependencies[32][64];
-    int dep_count = 0;
-
-    if (resolve_package_info(pkg_name, json_data, repo_url, sizeof(repo_url), configure_flags, sizeof(configure_flags), dependencies, &dep_count, 32) != 0) {
-        fprintf(stderr, "[-] Package/Dependency '%s' not found in index.\n", pkg_name);
-        return -1;
-    }
-
-    // Recursively resolve and install dependencies first
-    for (int i = 0; i < dep_count; i++) {
-        printf("[+] Resolving dependency: %s (needed by %s)\n", dependencies[i], pkg_name);
-        if (pkg_install_internal(dependencies[i], json_data) != 0) {
-            fprintf(stderr, "[-] Failed to install dependency '%s'\n", dependencies[i]);
-            return -1;
-        }
-    }
-
-    CPB_Config config = cpb_get_default_config();
-    config.description = "Installing";
-    config.min_refresh_time = 0.05;
-
-    CPB_ProgressBar bar;
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    int current_step = 0;
-    int last_cols = get_terminal_cols();
-
-    #define CHECK_RESIZE(step_val) \
-        current_step = step_val; \
-        if (winch_received) { \
-            winch_received = 0; \
-            int cols = get_terminal_cols(); \
-            if (cols != last_cols) { \
-                last_cols = cols; \
-                cpb_finish(&bar); \
-                cpb_init(&bar, 0, 7, config); \
-                cpb_start(&bar); \
-                cpb_update(&bar, current_step); \
-            } \
-        }
-
-    // Step 1 & 2: URL & Dependencies already resolved
-    CHECK_RESIZE(2);
-    cpb_update(&bar, 2);
-    cpb_finish(&bar);
-    printf("[+] Installing %s (Resolved URL: %s)\n", pkg_name, repo_url);
-    fflush(stdout);
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    cpb_update(&bar, 2);
-
-    char clone_dir[512], stage_dir[512], db_manifest[1150], cmd[2048];
-    snprintf(clone_dir, sizeof(clone_dir), "/tmp/scpm_build_%s", pkg_name);
-    snprintf(stage_dir, sizeof(stage_dir), "/tmp/scpm_stage_%s", pkg_name);
-    snprintf(db_manifest, sizeof(db_manifest), "%s/%s.list", MANIFEST_DIR, pkg_name);
-
-    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" \"%s\"", clone_dir, stage_dir);
-    run_cmd(cmd);
-
-    // Step 3: Clone Repository
-    CHECK_RESIZE(3);
-    cpb_update(&bar, 3);
-    cpb_finish(&bar);
-    printf("[+] Cloning repository via libgit2...\n");
-    fflush(stdout);
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    cpb_update(&bar, 3);
-
-    if (clone_package_repo(repo_url, clone_dir) != 0) {
-        cpb_finish(&bar);
-        fprintf(stderr, "[-] Repository clone failed for %s.\n", pkg_name);
-        return -1;
-    }
-
-    // Step 4: Build package (with automatic error log fallback check)
-    CHECK_RESIZE(4);
-    cpb_update(&bar, 4);
-    cpb_finish(&bar);
-    printf("[+] Building package (configure/make)...\n");
-    fflush(stdout);
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    cpb_update(&bar, 4);
-
-    snprintf(cmd, sizeof(cmd), "cd \"%s\" && if [ -f autogen.sh ]; then ./autogen.sh; fi && if [ -f configure ]; then ./configure %s; fi && make > /tmp/scpm_build_err.log 2>&1", clone_dir, configure_flags);
-    if (run_cmd(cmd) != 0) {
-        // Automatically check build error log for missing dependencies/headers
-        FILE *log_file = fopen("/tmp/scpm_build_err.log", "r");
-        int auto_installed = 0;
-        if (log_file) {
-            char log_line[512];
-            char missing_pkg[64] = "";
-            while (fgets(log_line, sizeof(log_line), log_file)) {
-                if (strstr(log_line, "curses.h") || strstr(log_line, "-lncurses")) {
-                    strcpy(missing_pkg, "ncurses");
-                    break;
-                } else if (strstr(log_line, "glib-2.0") || strstr(log_line, "glib.h")) {
-                    strcpy(missing_pkg, "glib");
-                    break;
-                }
-            }
-            fclose(log_file);
-
-            if (strlen(missing_pkg) > 0 && strcmp(missing_pkg, pkg_name) != 0) {
-                if (package_exists_in_index(missing_pkg, json_data)) {
-                    cpb_finish(&bar);
-                    printf("[+] Auto-detected missing dependency '%s' from build logs. Installing dynamically...\n", missing_pkg);
-                    if (pkg_install_internal(missing_pkg, json_data) == 0) {
-                        cpb_init(&bar, 0, 7, config);
-                        cpb_start(&bar);
-                        cpb_update(&bar, 4);
-                        
-                        snprintf(cmd, sizeof(cmd), "cd \"%s\" && make > /tmp/scpm_build_err.log 2>&1", clone_dir);
-                        if (run_cmd(cmd) == 0) {
-                            auto_installed = 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (!auto_installed) {
-            cpb_finish(&bar);
-            system("cat /tmp/scpm_build_err.log");
-            fprintf(stderr, "[-] Build process failed for %s.\n", pkg_name);
-            return -1;
-        }
-    }
-
-    // Step 5: Stage files
-    CHECK_RESIZE(5);
-    cpb_update(&bar, 5);
-    cpb_finish(&bar);
-    printf("[+] Staging files...\n");
-    fflush(stdout);
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    cpb_update(&bar, 5);
-
-    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" && cd \"%s\" && make DESTDIR=\"%s\" install > /dev/null 2>&1", stage_dir, clone_dir, stage_dir);
-    if (run_cmd(cmd) != 0) {
-        cpb_finish(&bar);
-        fprintf(stderr, "[-] Staging installation failed for %s.\n", pkg_name);
-        return -1;
-    }
-
-    // Step 6: Generate manifest & Deploy root
-    CHECK_RESIZE(6);
-    cpb_update(&bar, 6);
-    cpb_finish(&bar);
-    printf("[+] Generating manifest & deploying files...\n");
-    fflush(stdout);
-    cpb_init(&bar, 0, 7, config);
-    cpb_start(&bar);
-    cpb_update(&bar, 6);
-
-    snprintf(cmd, sizeof(cmd), "find \"%s\" -mindepth 1 -printf '%%P\n' | sort -r > \"%s\"", stage_dir, db_manifest);
-    run_cmd(cmd);
-    snprintf(cmd, sizeof(cmd), "rsync -a \"%s/\" /", stage_dir);
-    if (run_cmd(cmd) != 0) {
-        cpb_finish(&bar);
-        fprintf(stderr, "[-] Deployment to system root failed for %s.\n", pkg_name);
-        return -1;
-    }
-
-    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" \"%s\"", clone_dir, stage_dir);
-    run_cmd(cmd);
-
-    // Step 7: Complete
-    CHECK_RESIZE(7);
-    cpb_update(&bar, 7);
-    cpb_finish(&bar);
-
-    printf("[+] [SCPM] Successfully installed %s!\n", pkg_name);
-    return 0;
-}
-
 int pkg_remove(const char *pkg_name) {
-    char db_manifest[1150];
+    char db_manifest[4096];
     snprintf(db_manifest, sizeof(db_manifest), "%s/%s.list", MANIFEST_DIR, pkg_name);
-
+    
     FILE *f = fopen(db_manifest, "r");
     if (!f) {
-        fprintf(stderr, "[-] Package '%s' is not installed.\n", pkg_name);
+        fprintf(stderr, "[-] Error: Package '%s' is not installed.\n", pkg_name);
         return -1;
     }
 
-    printf("[+] [SCPM] Removing package: %s\n", pkg_name);
-    char lines[1024][512];
-    int count = 0;
-    while (fgets(lines[count], sizeof(lines[count]), f) && count < 1024) {
-        lines[count][strcspn(lines[count], "\n")] = 0;
-        count++;
+    printf("[+] Removing package: %s\n", pkg_name);
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (strlen(line) == 0) continue;
+        char full_path[2048];
+        snprintf(full_path, sizeof(full_path), "/%s", line);
+        unlink(full_path);
     }
     fclose(f);
-
-    for (int i = 0; i < count; i++) {
-        if (strlen(lines[i]) == 0) continue;
-        char full_path[1024];
-        snprintf(full_path, sizeof(full_path), "/%s", lines[i]);
-        struct stat st;
-        if (lstat(full_path, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) rmdir(full_path);
-            else unlink(full_path);
-        }
-    }
-
     unlink(db_manifest);
-    printf("[+] [SCPM] Successfully removed %s!\n", pkg_name);
+    printf("[+] Successfully removed %s!\n", pkg_name);
     return 0;
 }
 
@@ -439,12 +591,10 @@ int pkg_list() {
     init_db();
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "ls -1 %s/*.list 2>/dev/null", MANIFEST_DIR);
-
     FILE *fp = popen(cmd, "r");
     if (!fp) return -1;
 
-    printf("SCPM Installed Packages:\n");
-    printf("------------------------\n");
+    printf("Linux Nexus Installed Packages:\n-------------------------------\n");
     char path[512];
     int found = 0;
     while (fgets(path, sizeof(path), fp) != NULL) {
@@ -458,14 +608,8 @@ int pkg_list() {
         }
     }
     pclose(fp);
-    if (!found) printf("(No packages installed via SCPM)\n");
+    if (!found) printf("(No packages installed)\n");
     return 0;
-}
-
-int print_usage(const char *prog) {
-    printf("SCPM (Simple Custom Package Manager)\n");
-    printf("Usage: %s <command> [arguments]\n", prog);
-    return 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -474,22 +618,32 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
+    struct sigaction sa = {0};
     sa.sa_handler = handle_winch;
     sigaction(SIGWINCH, &sa, NULL);
 
-    if (argc < 2) return print_usage(argv[0]);
+    curl_global_init(CURL_GLOBAL_ALL);
 
-    if (strcmp(argv[1], "install") == 0) {
-        if (argc < 3) return print_usage(argv[0]);
-        return pkg_install(argv[2]);
-    } else if (strcmp(argv[1], "remove") == 0) {
-        if (argc < 3) return print_usage(argv[0]);
-        return pkg_remove(argv[2]);
-    } else if (strcmp(argv[1], "list") == 0) {
-        return pkg_list();
-    } else {
-        return print_usage(argv[0]);
+    if (argc < 2) {
+        printf("SCPM (Simple C Package Manager) - Linux Nexus\nUsage: %s <update|install|remove|list> [pkg]\n", argv[0]);
+        curl_global_cleanup();
+        return 1;
     }
+
+    int ret = 0;
+    if (strcmp(argv[1], "update") == 0) {
+        ret = pkg_update();
+    } else if (strcmp(argv[1], "install") == 0 && argc >= 3) {
+        ret = pkg_install(argv[2]);
+    } else if (strcmp(argv[1], "remove") == 0 && argc >= 3) {
+        ret = pkg_remove(argv[2]);
+    } else if (strcmp(argv[1], "list") == 0) {
+        ret = pkg_list();
+    } else {
+        printf("Invalid command or missing arguments.\n");
+        ret = 1;
+    }
+
+    curl_global_cleanup();
+    return ret;
 }
