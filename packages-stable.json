@@ -2,13 +2,13 @@
   "packages": [
     {
       "name": "ncurses",
-      "url": "https://github.com/mirror/ncurses.git",
+      "url": "https://github.com/mirror/ncurses/archive/refs/tags/v6.4.zip",
       "configure_flags": "--with-shared --without-debug --without-ada --without-cxx --enable-widec --with-xterm-kbs=DEL",
       "dependencies": []
     },
     {
       "name": "htop",
-      "url": "https://github.com/htop-dev/htop.git",
+      "url": "https://github.com/htop-dev/htop/archive/refs/tags/3.2.2.zip",
       "configure_flags": "",
       "dependencies": [
         "ncurses"
@@ -16,72 +16,72 @@
     },
     {
       "name": "redis",
-      "url": "https://github.com/redis/redis.git",
+      "url": "https://github.com/redis/redis/archive/refs/tags/7.2.4.zip",
       "dependencies": []
     },
     {
       "name": "git",
-      "url": "https://github.com/git/git.git",
+      "url": "https://github.com/git/git/archive/refs/tags/v2.43.0.zip",
       "dependencies": ["zlib", "openssl", "curl"]
     },
     {
       "name": "tmux",
-      "url": "https://github.com/tmux/tmux.git",
+      "url": "https://github.com/tmux/tmux/archive/refs/tags/3.4.zip",
       "dependencies": ["ncurses", "libevent"]
     },
     {
       "name": "curl",
-      "url": "https://github.com/curl/curl.git",
+      "url": "https://github.com/curl/curl/archive/refs/tags/curl-8_5_0.zip",
       "dependencies": ["openssl", "zlib"]
     },
     {
       "name": "jq",
-      "url": "https://github.com/stedolan/jq.git",
+      "url": "https://github.com/stedolan/jq/archive/refs/tags/jq-1.7.1.zip",
       "dependencies": ["oniguruma"]
     },
     {
       "name": "mpv",
-      "url": "https://github.com/mpv-player/mpv.git",
+      "url": "https://github.com/mpv-player/mpv/archive/refs/tags/v0.37.0.zip",
       "dependencies": ["ffmpeg", "libass", "lua"]
     },
     {
       "name": "zstd",
-      "url": "https://github.com/facebook/zstd.git",
+      "url": "https://github.com/facebook/zstd/archive/refs/tags/v1.5.5.zip",
       "dependencies": []
     },
     {
       "name": "zlib",
-      "url": "https://github.com/madler/zlib.git",
+      "url": "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip",
       "dependencies": []
     },
     {
       "name": "openssl",
-      "url": "https://github.com/openssl/openssl.git",
+      "url": "https://github.com/openssl/openssl/archive/refs/tags/openssl-3.2.1.zip",
       "dependencies": ["zlib"]
     },
     {
       "name": "libevent",
-      "url": "https://github.com/libevent/libevent.git",
+      "url": "https://github.com/libevent/libevent/archive/refs/tags/release-2.1.12-stable.zip",
       "dependencies": []
     },
     {
       "name": "oniguruma",
-      "url": "https://github.com/kkos/oniguruma.git",
+      "url": "https://github.com/kkos/oniguruma/archive/refs/tags/v6.9.9.zip",
       "dependencies": []
     },
     {
       "name": "ffmpeg",
-      "url": "https://github.com/FFmpeg/FFmpeg.git",
+      "url": "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n6.1.1.zip",
       "dependencies": ["zlib", "openssl"]
     },
     {
       "name": "libass",
-      "url": "https://github.com/libass/libass.git",
+      "url": "https://github.com/libass/libass/archive/refs/tags/0.17.1.zip",
       "dependencies": ["zlib"]
     },
     {
       "name": "lua",
-      "url": "https://github.com/lua/lua.git",
+      "url": "https://github.com/lua/lua/archive/refs/tags/v5.4.6.zip",
       "dependencies": []
     }
   ]
